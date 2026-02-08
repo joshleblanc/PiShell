@@ -1,0 +1,33 @@
+# Dependencies
+bin/
+obj/
+*.dll
+*.pdb
+*.user
+*.vscode
+.vs/
+
+# IDE
+.idea/
+*.suo
+*.cache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build output
+out/
+publish/
+
+# Logs
+*.log
+logs/
+
+# Test
+coverage/
+*.cov
+
+# Secrets
+.env
+!.env.example

@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "Container (Dockerfile)": {
+      "commandName": "Docker",
+      "containerRunEnvironmentFiles": "PiShell\\.env"
+    },
+    "PiShell (Process - Local)": {
+      "commandName": "Project",
+      "workingDirectory": "C:\\source\\pi-shell\\PiShell"
+    },
+    "WSL": {
+      "commandName": "WSL2",
+      "distributionName": ""
+    }
+  }
+}
