@@ -53,4 +53,4 @@ aliases:
 
 # Persistent data volumes (Docker volumes)
 volumes:
-  - picrust-data:/home/picrust
+  - /home/picrust:/home/picrust
