@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m picrust \
     && chown -R picrust:picrust /app
 
-# Copy agent config files into picrust's home (available during debug and production)
-COPY --chown=picrust:picrust AgentFiles/ /home/picrust/
+# Copy agent config files to a staging directory (bind mount will shadow /home/picrust)
+COPY --chown=picrust:picrust AgentFiles/ /opt/agent-files/
 
 ENV HOME=/home/picrust
 
@@ -50,4 +50,8 @@ COPY --from=publish /app/publish .
 ENV DOTNET_RUNNING_IN_CONTAINER=true
 ENV PI_CODING_AGENT_DIR=/home/picrust
 
-ENTRYPOINT ["dotnet", "PiCrust.dll"]
+# Seed agent files into the bind-mounted volume on startup
+COPY --chown=picrust:picrust entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
