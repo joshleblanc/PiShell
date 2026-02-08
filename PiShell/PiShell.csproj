@@ -14,8 +14,11 @@
 
   <!-- Exclude agent files from compilation (TypeScript, markdown) -->
   <ItemGroup>
+    <Compile Remove=".kamal\**" />
     <Compile Remove="AgentFiles\**" />
+    <EmbeddedResource Remove=".kamal\**" />
     <EmbeddedResource Remove="AgentFiles\**" />
+    <None Remove=".kamal\**" />
     <None Remove="AgentFiles\**" />
   </ItemGroup>
 
@@ -53,9 +56,6 @@
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
-    <None Include=".kamal\hooks\post-deploy" />
-    <None Include=".kamal\hooks\pre-deploy" />
-    <None Include=".kamal\secrets" />
     <None Include="AgentFiles\.gitkeep" />
     <None Include="AgentFiles\AGENTS.md" />
     <None Include="AgentFiles\BOOTSTRAP.md" />

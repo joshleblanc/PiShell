@@ -2,7 +2,10 @@
   "profiles": {
     "Container (Dockerfile)": {
       "commandName": "Docker",
-      "containerRunEnvironmentFiles": "PiShell\\.env"
+      "containerRunEnvironmentFiles": "PiShell\\.env",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
     },
     "PiShell (Process - Local)": {
       "commandName": "Project",

@@ -1,9 +1,14 @@
 # Kamal deployment configuration
 # See https://kamal-deploy.org/docs/configuration/
 
-# Primary server
+service: pishell 
+
+# Primary server (proxy disabled — this is a Discord bot, not a web app)
 servers:
-  - localhost  
+  web:
+    hosts:
+      - 137.184.164.224
+    proxy: false
 
 # Docker registry authentication
 registry:
@@ -17,6 +22,17 @@ env:
   clear:
     PI_CODING_AGENT_DIR: /home/pishell
     ASPNETCORE_ENVIRONMENT: Production
+
+builder:
+  context: PiShell
+  dockerfile: PiShell/Dockerfile
+  arch:
+    - amd64  
+
+aliases:
+  shell: app exec --interactive --reuse "bash"
+  logs: app logs -f
+  agent-files: app exec --interactive --reuse "ls -la /home/pishell/"
 
 # Build args passed to docker buildx build
 # build_args:

@@ -48,7 +48,6 @@ COPY --from=publish /app/publish .
 
 # Environment variables
 ENV DOTNET_RUNNING_IN_CONTAINER=true
-ENV ASPNETCORE_ENVIRONMENT=Development
 ENV PI_CODING_AGENT_DIR=/home/pishell
 
 ENTRYPOINT ["dotnet", "PiShell.dll"]
