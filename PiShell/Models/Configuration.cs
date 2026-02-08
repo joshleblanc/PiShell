@@ -1,4 +1,4 @@
-namespace PiShell
+namespace PiShell.Models
 {
     public class Configuration
     {

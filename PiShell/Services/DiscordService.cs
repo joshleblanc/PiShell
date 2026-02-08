@@ -2,12 +2,12 @@ using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using PiShell.Pi;
+using PiShell.Models;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json.Nodes;
 
-namespace PiShell.Discord;
+namespace PiShell.Services;
 
 /// <summary>
 /// Discord bot service that relays messages between Discord and pi.

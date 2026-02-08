@@ -2,12 +2,11 @@ using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using PiShell.Discord;
-using PiShell.Pi;
+using PiShell.Models;
 using System.Text;
 using System.Text.Json.Nodes;
 
-namespace PiShell.Scheduler;
+namespace PiShell.Services;
 
 /// <summary>
 /// Background service that runs heartbeat prompts on a schedule.

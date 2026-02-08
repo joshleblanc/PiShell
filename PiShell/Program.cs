@@ -5,9 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.Internal;
 using Microsoft.Extensions.Logging;
-using PiShell.Discord;
-using PiShell.Pi;
-using PiShell.Scheduler;
+using PiShell.Models;
+using PiShell.Services;
 
 namespace PiShell;
 
