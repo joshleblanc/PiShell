@@ -21,7 +21,7 @@ export default function (pi: ExtensionAPI) {
     let messageCount = 0;
     let lastSessionSummary = "";
     
-    pi.on("agent_end", async (event, ctx) => {
+    pi.on("session_shutdown", async (event, ctx) => {
         const messages = event.messages;
         if (!messages || messages.length === 0) return;
         
@@ -137,24 +137,15 @@ This file contains persistent context that survives across pi restarts and sessi
         parameters: Type.Object({
             edit: Type.Optional(Type.Boolean({ description: "Edit MEMORY.md" }))
         }),
-        execute: async (args, ctx) => {
-            if (args.edit) {
-                // Open editor for memory
-                ctx.ui?.editor?.("Edit Memory", "memory", {
-                    title: "Edit MEMORY.md",
-                    prefill: "" // Would load existing content
-                });
-            } else {
-                // Just read and show
-                const readResult = await pi.callTool("read", {
-                    path: MEMORY_PATH
-                });
-                return {
-                    content: [{ type: "text", text: readResult.content?.[0]?.text || "No memory file found." }],
-                    details: {}
-                };
-            }
-            return { content: [], details: {} };
+        handler: async (args, ctx) => {
+            // Just read and show
+            const readResult = await pi.callTool("read", {
+                path: MEMORY_PATH
+            });
+            return {
+                content: [{ type: "text", text: readResult.content?.[0]?.text || "No memory file found." }],
+                details: {}
+            };
         }
     });
     

@@ -13,7 +13,7 @@ import { Type } from "@sinclair/typebox";
 export default function (pi: ExtensionAPI) {
     const IDENTITY_PATH = "IDENTITY.md";
 
-    pi.on("agent_start", async (event, ctx) => {
+    pi.on("session_start", async (event, ctx) => {
         try {
             // Try to read IDENTITY.md
             const readResult = await pi.callTool("read", {
@@ -21,13 +21,15 @@ export default function (pi: ExtensionAPI) {
             });
 
             const identityContent = readResult.content?.[0]?.text;
+            console.log("dodood")
             if (identityContent && identityContent.trim().length > 0) {
                 // Log that identity was loaded (for debugging)
-
+                console.log("[identity] Loaded IDENTITY.md content.");
                 // The identity will be used by other extensions or via MEMORY.md
                 // We can also make it available via a tool
             }
         } catch (error) {
+            console.log("[identity] No IDENTITY.md found, using default identity.");
             // IDENTITY.md doesn't exist yet - that's okay
         }
     });
@@ -39,7 +41,7 @@ export default function (pi: ExtensionAPI) {
         parameters: Type.Object({
             edit: Type.Optional(Type.Boolean({ description: "Edit IDENTITY.md" }))
         }),
-        execute: async (args, ctx) => {
+        handler: async (args, ctx) => {
             if (args.edit) {
                 // Open editor for identity
                 ctx.ui?.editor?.("Edit Identity", "identity", {
