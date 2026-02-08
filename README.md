@@ -90,7 +90,7 @@ kamal setup
 kamal deploy
 
 # View logs (from WSL or SSH)
-ssh root@your.server.ip "docker logs --tail 50 -f \$(docker ps -q --filter label=service=picrust)"
+kamal logs
 
 # Shell into the container
 kamal shell
@@ -305,4 +305,4 @@ sudo ls -la /var/lib/docker/volumes/picrust-data/_data/
 
 ## License
 
-MIT
+Unlicense

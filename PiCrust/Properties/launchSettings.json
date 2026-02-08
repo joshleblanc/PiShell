@@ -6,14 +6,6 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
-    },
-    "PiCrust (Process - Local)": {
-      "commandName": "Project",
-      "workingDirectory": "C:\\source\\pi-shell\\PiCrust"
-    },
-    "WSL": {
-      "commandName": "WSL2",
-      "distributionName": ""
     }
   }
 }
