@@ -343,7 +343,7 @@ public class PiService(
     {
         try
         {
-            var process = new Process
+            using var process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
@@ -357,14 +357,15 @@ public class PiService(
                 }
             };
             process.Start();
+            process.WaitForExit(5000);
+            if (!process.HasExited)
+                process.Kill();
+            return true;
         }
         catch
         {
             return false;
         }
-
-        return true;
-        
     }
 
     private static string? FindPiExecutable()
