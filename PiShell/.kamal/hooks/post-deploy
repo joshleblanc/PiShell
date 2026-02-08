@@ -1,0 +1,14 @@
+#!/bin/bash
+# Called after the new version of the app is successfully deployed
+# Useful for database migrations, cache clearing, etc.
+
+echo "Deploy finished successfully!"
+
+# Example: Restart any dependent services
+# docker-compose -f docker-compose.override.yml restart redis
+
+# Example: Run database migrations (if using a database)
+# ssh -p 22 $SERVER_USER@$SERVER_HOST "cd $APP_DIR && bundle exec rails db:migrate"
+
+# Example: Notify monitoring systems
+# curl -X POST https://hooks.example.com/deploy finished

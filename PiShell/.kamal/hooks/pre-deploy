@@ -1,0 +1,17 @@
+#!/bin/bash
+# Called before the new version of the app is deployed
+# Useful for pre-deployment checks, backups, etc.
+
+echo "Starting deploy..."
+
+# Example: Create a backup before deploy
+# ssh -p 22 $SERVER_USER@$SERVER_HOST "pg_dump -U postgres myapp > backups/pre-deploy-$(date +%Y%m%d-%H%M%S).sql"
+
+# Example: Check server health before deploy
+# if ! curl -sf http://$SERVER_HOST:8080/up > /dev/null; then
+#   echo "Server is not healthy, skipping deploy"
+#   exit 1
+# fi
+
+# Example: Ensure required directories exist
+# ssh -p 22 $SERVER_USER@$SERVER_HOST "mkdir -p /home/pishell/{memories,prompts,sessions,skills}"

@@ -1,0 +1,40 @@
+# Kamal deployment configuration
+# See https://kamal-deploy.org/docs/configuration/
+
+# Primary server
+servers:
+  - localhost  
+
+# Docker registry authentication
+registry:
+  server: localhost:5555
+
+env:
+  secret:
+    - MINIMAX_API_KEY
+    - DISCORD_TOKEN
+    - OWNER_ID
+  clear:
+    PI_CODING_AGENT_DIR: /home/pishell
+    ASPNETCORE_ENVIRONMENT: Production
+
+# Build args passed to docker buildx build
+# build_args:
+#   - BUILD_CONFIG=Release
+
+# Environment variables to set in the application container
+# env:
+#   clear:
+#     RAILS_ENV: production
+#   secret:
+#     - RAILS_MASTER_KEY
+#     - SOME_API_KEY
+
+# Environment file(s) to load (on server)
+# env_file:
+#   - .env.production
+
+
+# Persistent data volumes (Docker volumes)
+volumes:
+  - pishell-data:/home/pishell

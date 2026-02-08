@@ -30,4 +30,10 @@ coverage/
 
 # Secrets
 .env
+.env.*
 !.env.example
+
+# Deployment
+.kamal/
+config/deploy.yml
+
