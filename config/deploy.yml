@@ -14,6 +14,8 @@ servers:
 registry:
   server: localhost:5555
 
+retain_containers: 1
+
 env:
   secret:
     - MINIMAX_API_KEY
