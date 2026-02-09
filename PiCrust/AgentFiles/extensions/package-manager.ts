@@ -26,7 +26,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "install_package",
         label: "Install Package",
-        description: "Install a pi package from npm, git, or https source. After installation, call reload_runtime.",
+        description: "Install a pi package from npm, git, or https source. The runtime will be reloaded automatically after installation.",
         parameters: Type.Object({
             source: Type.String({
                 description: "Package source (npm:@scope/name, git:github.com/user/repo, or https://github.com/user/repo)",
@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI) {
             }
 
             return {
-                content: [{ type: "text", text: `Installed ${source}. Call reload_runtime to load the new extension.` }],
+                content: [{ type: "text", text: `Installed ${source}. The runtime will be reloaded automatically.` }],
                 details: { success: true, output },
             };
         },
@@ -95,7 +95,7 @@ export default function (pi: ExtensionAPI) {
             }
 
             return {
-                content: [{ type: "text", text: `Removed ${source}` }],
+                content: [{ type: "text", text: `Removed ${source}. The runtime will be reloaded automatically.` }],
                 details: { success: true, output },
             };
         },
@@ -132,7 +132,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "update_packages",
         label: "Update Packages",
-        description: "Update all installed packages (skips pinned versions). Specify a package to update just that one.",
+        description: "Update all installed packages (skips pinned versions). The runtime will be reloaded automatically after updating.",
         parameters: Type.Object({
             source: Type.Optional(Type.String({
                 description: "Optional: specific package to update",
@@ -151,7 +151,7 @@ export default function (pi: ExtensionAPI) {
             }
 
             return {
-                content: [{ type: "text", text: output.trim() || "Packages updated" }],
+                content: [{ type: "text", text: output.trim() || "Packages updated. The runtime will be reloaded automatically." }],
                 details: { success: true, output },
             };
         },

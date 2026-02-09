@@ -62,7 +62,7 @@
     <None Include="AgentFiles\extensions\auto-memory.ts" />
     <None Include="AgentFiles\extensions\package-manager.ts" />
     <None Include="agentfiles\extensions\picrust.ts" />
-    <None Include="agentfiles\extensions\reload-runtime.ts" />
+    <None Include="AgentFiles\extensions\reload-runtime.ts" />
     <None Include="AgentFiles\HEARTBEAT.md" />
     <None Include="AgentFiles\IDENTITY.md" />
     <None Include="agentfiles\memories\.keep" />

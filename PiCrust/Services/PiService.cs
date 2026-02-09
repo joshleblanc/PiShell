@@ -24,9 +24,13 @@ public class PiService(
     private Process? _process;
     private StreamWriter? _stdin;
     private StreamReader? _stdout;
-    private readonly CancellationTokenSource _cts = new();
+    private readonly CancellationTokenSource _serviceCts = new();
+    private CancellationTokenSource? _processCts;
     private readonly Dictionary<string, TaskCompletionSource<JsonNode>> _pendingRequests = [];
     private readonly Lock _pendingLock = new();
+    private string? _piPath;
+    private string? _resolvedWorkingDir;
+    private Task? _listenerTask;
 
     public event Func<PiEvent, Task>? OnEvent;
     public event Func<string, Task>? OnLog;
@@ -43,13 +47,13 @@ public class PiService(
     {
         try
         {
-            var piPath = FindPiExecutable();
+            _piPath = FindPiExecutable();
 
             // Debug: log PATH contents
             var pathEnv = Environment.GetEnvironmentVariable("PATH");
             _logger.LogDebug("PATH: {Path}", pathEnv);
 
-            if (piPath == null)
+            if (_piPath == null)
             {
                 _logger.LogError("pi executable not found. Make sure pi is installed.");
                 _logger.LogInformation("Searching in: {NpmPath}", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm"));
@@ -57,69 +61,19 @@ public class PiService(
                 return;
             }
 
-            _logger.LogInformation("Starting pi at {Path}", piPath);
-            _logger.LogInformation("Working directory: {WorkingDir}", _workingDirectory);
-
             // Validate and resolve working directory
-            var workingDir = _workingDirectory;
-            if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
+            _resolvedWorkingDir = _workingDirectory;
+            if (string.IsNullOrWhiteSpace(_resolvedWorkingDir) || !Directory.Exists(_resolvedWorkingDir))
             {
-                _logger.LogWarning("Working directory '{Dir}' is invalid, using current directory", workingDir);
-                workingDir = AppContext.BaseDirectory;
+                _logger.LogWarning("Working directory '{Dir}' is invalid, using current directory", _resolvedWorkingDir);
+                _resolvedWorkingDir = AppContext.BaseDirectory;
             }
             else
             {
-                workingDir = Path.GetFullPath(workingDir);
+                _resolvedWorkingDir = Path.GetFullPath(_resolvedWorkingDir);
             }
 
-            var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-            // Convert Windows path to Unix-style for pi environment variable
-            var piHomeDir = homeDir.Replace("\\", "/");
-
-            _process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {  
-                    FileName = piPath,
-                    Arguments = "--mode rpc",
-                    WorkingDirectory = workingDir,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-
-            _process.ErrorDataReceived += (_, args) =>
-            {
-                if (!string.IsNullOrEmpty(args.Data))
-                {
-                    OnLog?.Invoke($"[ERROR] {args.Data}");
-                    _logger.LogError("pi error: {Data}", args.Data);
-                }
-            };
-
-            _process.Start();
-            _stdin = _process.StandardInput;
-            _stdout = _process.StandardOutput;
-
-            // Do not call BeginOutputReadLine() here. ListenForEventsAsync reads from
-            // StandardOutput using ReadLineAsync. Calling BeginOutputReadLine would
-            // mix asynchronous/synchronous operations on the same stream and throw
-            // "Cannot mix synchronous and asynchronous operation on process stream."
-            _process.BeginErrorReadLine();
-
-            Task.Run(ListenForEventsAsync);
-
-            // Give pi a moment to fully initialize
-            await Task.Delay(500, stoppingToken);
-
-            // Build and send the system prompt from markdown files
-           // await SendSystemPromptAsync(stoppingToken);
-
-            _logger.LogInformation("pi started successfully");
+            await StartPiProcessAsync();
         }
         catch (Exception ex)
         {
@@ -127,11 +81,68 @@ public class PiService(
             _lifetime.StopApplication();
         }
     }
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("Stopping pi...");
 
-        _cts.Cancel();
+    private async Task StartPiProcessAsync()
+    {
+        _logger.LogInformation("Starting pi at {Path}", _piPath);
+        _logger.LogInformation("Working directory: {WorkingDir}", _resolvedWorkingDir);
+
+        _processCts = new CancellationTokenSource();
+
+        _process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {  
+                FileName = _piPath!,
+                Arguments = "--mode rpc",
+                WorkingDirectory = _resolvedWorkingDir!,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+
+        _process.ErrorDataReceived += (_, args) =>
+        {
+            if (!string.IsNullOrEmpty(args.Data))
+            {
+                OnLog?.Invoke($"[ERROR] {args.Data}");
+                _logger.LogError("pi error: {Data}", args.Data);
+            }
+        };
+
+        _process.Start();
+        _stdin = _process.StandardInput;
+        _stdout = _process.StandardOutput;
+
+        // Do not call BeginOutputReadLine() here. ListenForEventsAsync reads from
+        // StandardOutput using ReadLineAsync. Calling BeginOutputReadLine would
+        // mix asynchronous/synchronous operations on the same stream and throw
+        // "Cannot mix synchronous and asynchronous operation on process stream."
+        _process.BeginErrorReadLine();
+
+        _listenerTask = Task.Run(ListenForEventsAsync);
+
+        // Give pi a moment to fully initialize
+        await Task.Delay(500);
+
+        _logger.LogInformation("pi started successfully");
+    }
+
+    private async Task StopPiProcessAsync()
+    {
+        _logger.LogInformation("Stopping pi process...");
+
+        _processCts?.Cancel();
+
+        // Wait for the event listener to finish before disposing streams
+        if (_listenerTask != null)
+        {
+            try { await _listenerTask; } catch { /* listener handles its own exceptions */ }
+            _listenerTask = null;
+        }
 
         try
         {
@@ -139,9 +150,8 @@ public class PiService(
 
             if (_process != null && !_process.HasExited)
             {
-                // Give the process a chance to exit gracefully
                 await Task.WhenAny(
-                    Task.Delay(2000, cancellationToken),
+                    Task.Delay(2000),
                     Task.Run(() => _process!.WaitForExit(2000))
                 );
 
@@ -160,7 +170,39 @@ public class PiService(
         _process?.Dispose();
         _stdin?.Dispose();
         _stdout?.Dispose();
-        _cts.Dispose();
+        _processCts?.Dispose();
+
+        _process = null;
+        _stdin = null;
+        _stdout = null;
+        _processCts = null;
+
+        // Clear any pending RPC requests
+        lock (_pendingLock)
+        {
+            foreach (var kvp in _pendingRequests)
+            {
+                kvp.Value.TrySetCanceled();
+            }
+            _pendingRequests.Clear();
+        }
+
+        _heartbeatHandler = null;
+    }
+
+    public async Task RestartAsync()
+    {
+        _logger.LogInformation("Restarting pi process...");
+        await StopPiProcessAsync();
+        await StartPiProcessAsync();
+    }
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Stopping pi...");
+
+        _serviceCts.Cancel();
+        await StopPiProcessAsync();
+        _serviceCts.Dispose();
 
         await base.StopAsync(cancellationToken);
     }
@@ -170,11 +212,18 @@ public class PiService(
         try
         {
             string? line;
-            while ((line = await _stdout!.ReadLineAsync(_cts.Token)) != null)
+            while ((line = await _stdout!.ReadLineAsync(_processCts!.Token)) != null)
             {
                 try
                 {
                     _logger.LogDebug(line);
+
+                    // Skip empty lines and non-JSON output (e.g. git clone, npm audit messages during reload)
+                    if (string.IsNullOrWhiteSpace(line) || (line[0] != '{' && line[0] != '['))
+                    {
+                        continue;
+                    }
+
                     var node = JsonNode.Parse(line);
                     if (node == null) continue;
 

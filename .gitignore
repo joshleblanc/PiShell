@@ -369,3 +369,4 @@ PiCrust/AgentFiles/sessions/**/*
 PiCrust/AgentFiles/memories/**/*
 !PiCrust/AgentFiles/sessions/.keep
 !PiCrust/AgentFiles/memories/.keep
+/PiCrust/AgentFiles/settings.json

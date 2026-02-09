@@ -35,6 +35,9 @@ public class DiscordService(
     public event Action<ISocketMessageChannel>? OnChannelUsed;
 
     private IDisposable? _typing;
+
+    // Track whether a runtime reload is needed after the current agent run
+    private bool _reloadNeeded = false;
     
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -188,8 +191,22 @@ public class DiscordService(
                 _logger.LogDebug("Tool execution: {Tool}", evt.Data["toolName"]);
                 break;
             case "tool_execution_end":
-                _logger.LogDebug("Tool execution completed: {Tool}", evt.Data["toolName"]);
+                HandleToolExecutionEnd(evt.Data);
                 break;
+        }
+    }
+
+    private void HandleToolExecutionEnd(JsonNode data)
+    {
+        var toolName = data["toolName"]?.GetValue<string>();
+        var isError = data["isError"]?.GetValue<bool>() ?? true;
+
+        _logger.LogDebug("Tool execution completed: {Tool} (error: {IsError})", toolName, isError);
+
+        if (!isError && toolName is "install_package" or "uninstall_package" or "update_packages" or "reload_runtime")
+        {
+            _reloadNeeded = true;
+            _logger.LogDebug("Runtime reload will be triggered after agent completes");
         }
     }
 
@@ -218,60 +235,90 @@ public class DiscordService(
         // Find the oldest pending request
         if (!_pendingRequests.Any())
         {
-            _typing?.Dispose();
-            _typing = null;
             _logger.LogDebug("No pending requests, ignoring agent_end");
-            return;
         }
-
-        var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).First();
-        var requestId = oldestRequest.Key;
-        var pendingRequest = oldestRequest.Value;
-
-        // Get the final response text
-        var messages = data["messages"]?.AsArray();
-        if (messages == null) return;
-
-        var assistantMessage = messages.LastOrDefault(m =>
-            m?["role"]?.GetValue<string>() == "assistant");
-
-        if (assistantMessage == null) return;
-
-        var responseText = ExtractTextContent(assistantMessage);
-
-        // Use streamed response if available, otherwise use final message
-        var finalResponse = responseText;
-        if (_responseBuffers.TryRemove(requestId, out var buffer))
+        else
         {
-            if (buffer.Length > 0)
+            var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).First();
+            var requestId = oldestRequest.Key;
+            var pendingRequest = oldestRequest.Value;
+
+            // Get the final response text
+            var messages = data["messages"]?.AsArray();
+            var finalResponse = "";
+
+            if (messages != null)
             {
-                finalResponse = buffer.ToString();
+                var assistantMessage = messages.LastOrDefault(m =>
+                    m?["role"]?.GetValue<string>() == "assistant");
+
+                if (assistantMessage != null)
+                {
+                    var responseText = ExtractTextContent(assistantMessage);
+
+                    // Use streamed response if available, otherwise use final message
+                    finalResponse = responseText;
+                    if (_responseBuffers.TryRemove(requestId, out var buffer))
+                    {
+                        if (buffer.Length > 0)
+                        {
+                            finalResponse = buffer.ToString();
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrEmpty(finalResponse))
+            {
+                _logger.LogDebug("No text content in assistant response");
+                _pendingRequests.TryRemove(requestId, out _);
+            }
+            else
+            {
+                _logger.LogInformation("pi response: {Response}", Truncate(finalResponse, 200));
+
+                // Send response back to Discord
+                try
+                {
+                    await SendResponseToDiscordAsync(pendingRequest, finalResponse);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to send response to Discord");
+                }
+                finally
+                {
+                    // Clean up
+                    _pendingRequests.TryRemove(requestId, out _);
+                }
             }
         }
 
-        if (string.IsNullOrEmpty(finalResponse))
+        // Trigger runtime reload if a package operation was performed
+        // This runs regardless of whether there was a pending Discord request
+        if (_reloadNeeded)
         {
-            _logger.LogDebug("No text content in assistant response");
-            _pendingRequests.TryRemove(requestId, out _);
-            return;
+            _reloadNeeded = false;
+            _logger.LogInformation("Package operation detected, triggering runtime reload");
+            try
+            {
+                await _piClient.RestartAsync();
+
+                // Notify the last used channel that the reload completed
+                if (_lastChannel != null)
+                {
+                    await _lastChannel.SendMessageAsync("Runtime reloaded. Extensions are up to date.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to trigger runtime reload");
+            }
         }
 
-        _logger.LogInformation("pi response: {Response}", Truncate(finalResponse, 200));
-
-        // Send response back to Discord
-        try
-        {
-            await SendResponseToDiscordAsync(pendingRequest, finalResponse);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to send response to Discord");
-        }
-        finally
-        {
-            // Clean up
-            _pendingRequests.TryRemove(requestId, out _);
-        }
+        // Always stop the typing indicator when the agent finishes
+        _typing?.Dispose();
+        _typing = null;
     }
 
     private async Task SendResponseToDiscordAsync(PendingRequest request, string response)
