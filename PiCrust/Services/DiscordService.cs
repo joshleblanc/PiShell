@@ -95,7 +95,8 @@ public class DiscordService(
         {
             Channel = message.Channel,
             OriginalMessage = userMessage,
-            StartedAt = DateTime.UtcNow
+            StartedAt = DateTime.UtcNow,
+            Typing = message.Channel.EnterTypingState()
         };
         _pendingRequests[message.Id] = pendingRequest;
         _responseBuffers[message.Id] = new StringBuilder();
@@ -221,6 +222,8 @@ public class DiscordService(
         var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).First();
         var requestId = oldestRequest.Key;
         var pendingRequest = oldestRequest.Value;
+
+        pendingRequest.Typing.Dispose();
 
         // Get the final response text
         var messages = data["messages"]?.AsArray();
@@ -434,5 +437,6 @@ public class DiscordService(
         public ISocketMessageChannel? Channel { get; init; }
         public SocketUserMessage? OriginalMessage { get; init; }
         public DateTime StartedAt { get; init; }
+        public IDisposable Typing { get; internal set; }
     }
 }
