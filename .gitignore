@@ -364,3 +364,8 @@ FodyWeavers.xsd
 
 .env
 .pi
+
+PiCrust/AgentFiles/sessions/**/*
+PiCrust/AgentFiles/memories/**/*
+!PiCrust/AgentFiles/sessions/.keep
+!PiCrust/AgentFiles/memories/.keep

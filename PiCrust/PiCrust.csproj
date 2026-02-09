@@ -59,15 +59,20 @@
     <None Include="AgentFiles\.gitkeep" />
     <None Include="AgentFiles\AGENTS.md" />
     <None Include="AgentFiles\BOOTSTRAP.md" />
+    <None Include="AgentFiles\extensions\auto-memory.ts" />
+    <None Include="AgentFiles\extensions\package-manager.ts" />
+    <None Include="agentfiles\extensions\picrust.ts" />
     <None Include="AgentFiles\HEARTBEAT.md" />
     <None Include="AgentFiles\IDENTITY.md" />
+    <None Include="agentfiles\memories\.keep" />
     <None Include="AgentFiles\MEMORY.md" />
+    <None Include="agentfiles\prompts\.keep" />
     <None Include="AgentFiles\README.md" />
+    <None Include="agentfiles\sessions\.keep" />
+    <None Include="agentfiles\skills\.keep" />
     <None Include="AgentFiles\SOUL.md" />
     <None Include="AgentFiles\TOOLS.md" />
     <None Include="AgentFiles\USER.md" />
-    <None Include="AgentFiles\extensions\auto-memory\auto-memory.ts" />
-    <None Include="AgentFiles\extensions\identity\identity.ts" />
     <None Include="AgentFiles\extensions\session-manager.ts" />
   </ItemGroup>
   <ItemGroup>

@@ -18,6 +18,7 @@ RUN useradd -m picrust \
 COPY --chown=picrust:picrust AgentFiles/ /opt/agent-files/
 
 ENV HOME=/home/picrust
+ENV PI_CODING_AGENT_DIR=/app/AgentFiles
 
 EXPOSE 8080
 EXPOSE 8081
