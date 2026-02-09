@@ -1,6 +1,11 @@
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS base
 WORKDIR /app
 
+# Configure apt to use HTTPS sources
+RUN echo "deb https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" > /etc/apt/sources.list && \
+    echo "deb https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb https://archive.ubuntu.com/ubuntu noble-security main restricted universe multiverse" >> /etc/apt/sources.list
+
 # Install Node.js 20 from NodeSource and pi
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
