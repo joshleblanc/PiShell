@@ -29,6 +29,9 @@ public class HeartbeatService(
     // Track the channel to send heartbeats to (follows the last channel used)
     private ISocketMessageChannel? _heartbeatChannel;
 
+    // Track the last date we checked for new session
+    private string? _lastSessionDate;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Heartbeat scheduler started. Interval: {Interval} minutes", _intervalMinutes);
@@ -82,6 +85,41 @@ public class HeartbeatService(
         }
     }
 
+    private async Task CheckAndCreateNewSessionAsync()
+    {
+        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+
+        // Initialize on first run
+        if (_lastSessionDate == null)
+        {
+            _lastSessionDate = today;
+            _logger.LogInformation("Initialized session date tracking: {Date}", today);
+            return;
+        }
+
+        // Check if the date has changed
+        if (today != _lastSessionDate)
+        {
+            _logger.LogInformation("Date changed from {LastDate} to {Today} - creating new session",
+                _lastSessionDate, today);
+            _lastSessionDate = today;
+
+
+            // Try to load custom new session prompt
+
+            try
+            {
+                await _piClient.SendNewSessionAsync();
+                _logger.LogInformation("New session prompt sent for {Date}", today);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to create new session");
+                _piClient.SetHeartbeatHandler(null);
+            }
+        }
+    }
+
     private async Task RunHeartbeatAsync(CancellationToken ct)
     {
         var now = DateTime.UtcNow;
@@ -101,6 +139,9 @@ public class HeartbeatService(
                 "Send a message to the bot first to establish a channel.");
             return;
         }
+
+        // Check if the date has changed - create a new session
+        await CheckAndCreateNewSessionAsync();
 
         // Clear buffer and start collecting response
         lock (_heartbeatLock)

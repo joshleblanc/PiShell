@@ -312,6 +312,11 @@ public class PiService(
         });
     }
 
+    public Task SendNewSessionAsync()
+    {
+        return SendCommandAsync(new { type = "new_session" });
+    }
+
     public Task SendSteerAsync(string message)
     {
         return SendCommandAsync(new { type = "steer", message });
