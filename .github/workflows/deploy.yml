@@ -9,7 +9,7 @@ env:
   OWNER_ID: ${{ secrets.OWNER_ID }}
   DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
   DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-
+  PI_MODEL: ${{ secrets.PI_MODEL }}
 jobs:
   # Run tests before deployment (unless skipped)
 
