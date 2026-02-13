@@ -43,8 +43,21 @@ public class Program
             DiscordToken = configuration["DISCORD_TOKEN"] ?? string.Empty,
             PiCodingAgentDir = configuration["PI_CODING_AGENT_DIR"] ?? string.Empty,
             OwnerId = ulong.TryParse(configuration["OWNER_ID"], out var ownerId) ? ownerId : 0,
-            HeartbeatIntervalMinutes = int.TryParse(configuration["HEARTBEAT_INTERVAL_MINUTES"], out var interval) ? interval : 30
+            HeartbeatIntervalMinutes = int.TryParse(configuration["HEARTBEAT_INTERVAL_MINUTES"], out var interval) ? interval : 30,
+            
+            // Provider/Model configuration - supports "provider/model" format via PI_MODEL
+            // or separate PI_PROVIDER and PI_MODEL env vars
+            PiProvider = configuration["PI_PROVIDER"] ?? string.Empty,
+            PiModel = configuration["PI_MODEL"] ?? string.Empty
         };
+        
+        // Handle "provider/model" format in PI_MODEL (e.g., "anthropic/claude-sonnet-20241022")
+        if (!string.IsNullOrEmpty(appConfig.PiModel) && appConfig.PiModel.Contains('/') && string.IsNullOrEmpty(appConfig.PiProvider))
+        {
+            var parts = appConfig.PiModel.Split('/', 2);
+            appConfig.PiProvider = parts[0];
+            appConfig.PiModel = parts[1];
+        }
 
         var piDir = appConfig.PiCodingAgentDir;
         var workingDir = !string.IsNullOrEmpty(piDir)
@@ -62,13 +75,21 @@ public class Program
 
                 // Working directory
                 services.AddSingleton(new WorkingDirectoryOptions { Directory = workingDir });
+                
+                // Provider/Model configuration
+                services.AddSingleton(new PiModelOptions 
+                { 
+                    Provider = appConfig.PiProvider, 
+                    Model = appConfig.PiModel 
+                });
 
                 services.AddSingleton<PiService>(sp =>
                 {
                     var logger = sp.GetRequiredService<ILogger<PiService>>();
                     var lifetime = sp.GetRequiredService<IHostApplicationLifetime>();
                     var workingDirOptions = sp.GetRequiredService<WorkingDirectoryOptions>();
-                    return new PiService(logger, lifetime, workingDirOptions);
+                    var modelOptions = sp.GetRequiredService<PiModelOptions>();
+                    return new PiService(logger, lifetime, workingDirOptions, modelOptions);
                 });
                 // Pi client (hosted service - starts/stops with the application)
                 services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<PiService>());
@@ -132,4 +153,13 @@ public class Program
 public class WorkingDirectoryOptions
 {
     public string Directory { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Options for pi model configuration.
+/// </summary>
+public class PiModelOptions
+{
+    public string Provider { get; set; } = string.Empty;
+    public string Model { get; set; } = string.Empty;
 }

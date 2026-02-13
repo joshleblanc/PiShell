@@ -15,11 +15,14 @@ namespace PiCrust.Services;
 public class PiService(
     ILogger<PiService> logger,
     IHostApplicationLifetime lifetime,
-    WorkingDirectoryOptions workingDirOptions) : BackgroundService
+    WorkingDirectoryOptions workingDirOptions,
+    PiModelOptions modelOptions) : BackgroundService
 {
     private readonly ILogger<PiService> _logger = logger;
     private readonly IHostApplicationLifetime _lifetime = lifetime;
     private readonly string _workingDirectory = workingDirOptions.Directory;
+    private readonly string _provider = modelOptions.Provider;
+    private readonly string _model = modelOptions.Model;
 
     private Process? _process;
     private StreamWriter? _stdin;
@@ -90,12 +93,25 @@ public class PiService(
 
         _processCts = new CancellationTokenSource();
 
+        // Build arguments: --mode rpc [--provider <provider>] [--model <model>]
+        var arguments = "--mode rpc";
+        if (!string.IsNullOrEmpty(_provider))
+        {
+            arguments += $" --provider {_provider}";
+            _logger.LogInformation("Using provider: {Provider}", _provider);
+        }
+        if (!string.IsNullOrEmpty(_model))
+        {
+            arguments += $" --model {_model}";
+            _logger.LogInformation("Using model: {Model}", _model);
+        }
+
         _process = new Process
         {
             StartInfo = new ProcessStartInfo
             {  
                 FileName = _piPath!,
-                Arguments = "--mode rpc",
+                Arguments = arguments,
                 WorkingDirectory = _resolvedWorkingDir!,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
