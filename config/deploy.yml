@@ -21,6 +21,7 @@ env:
     - MINIMAX_API_KEY
     - DISCORD_TOKEN
     - OWNER_ID
+    - PI_MODEL
   clear:
     PI_CODING_AGENT_DIR: /home/picrust
     ASPNETCORE_ENVIRONMENT: Production
