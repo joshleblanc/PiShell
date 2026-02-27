@@ -328,6 +328,34 @@ public class PiService(
         });
     }
 
+    /// <summary>
+    /// Sends a prompt without waiting for completion. Events still stream via OnEvent.
+    /// Use this for fire-and-forget background tasks.
+    /// </summary>
+    public async Task SendPromptFireAndForgetAsync(string message, List<PiImage>? images = null)
+    {
+        // Wait for the process to be ready (blocks during restart)
+        await _readyGate.Task;
+
+        if (_stdin == null)
+        {
+            _logger.LogError("pi stdin not available");
+            return;
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            type = "prompt",
+            message,
+            images = images?.Select(i => new { type = "image", data = i.Data, mimeType = i.MimeType }).ToArray()
+        });
+        
+        await _stdin.WriteLineAsync(json);
+        await _stdin.FlushAsync();
+        
+        _logger.LogInformation("Fire-and-forget prompt sent, events will stream asynchronously");
+    }
+
     public Task SendNewSessionAsync()
     {
         return SendCommandAsync(new { type = "new_session" });

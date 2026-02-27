@@ -43,7 +43,7 @@ public class DiscordService(
     private bool _reloadNeeded = false;
 
     // Streaming configuration
-    private const int FlushThreshold = 1500; // Characters before flushing a chunk
+    private const int FlushThreshold = 500; // Characters before flushing a chunk (lowered for more responsive streaming)
     private const int MinChunkSize = 100;    // Minimum chunk size to avoid too many small messages
     
 
@@ -117,8 +117,11 @@ public class DiscordService(
         // Extract images if any
         var images = await ExtractImagesAsync(userMessage);
 
-        // Send to pi
-        await _piClient.SendPromptAsync(userMessage.Content, images);
+        // Send to pi - runs asynchronously, events stream to Discord in real-time
+        await _piClient.SendPromptFireAndForgetAsync(userMessage.Content, images);
+        
+        // Don't wait for agent_end - let it run in background
+        // The events will still stream via OnEvent handler
     }
 
     private bool ShouldRespond(SocketUserMessage message)
@@ -196,10 +199,107 @@ public class DiscordService(
                 break;
             case "tool_execution_start":
                 _logger.LogDebug("Tool execution: {Tool}", evt.Data["toolName"]);
+                // Notify Discord that a tool is starting
+                await NotifyToolExecutionAsync(evt.Data, isStart: true);
+                break;
+            case "tool_execution_update":
+                // Stream tool output in real-time
+                await HandleToolExecutionUpdateAsync(evt.Data);
                 break;
             case "tool_execution_end":
                 HandleToolExecutionEnd(evt.Data);
+                // Notify Discord that tool completed
+                await NotifyToolExecutionAsync(evt.Data, isStart: false);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Handles tool execution update events - streams tool output to Discord in real-time.
+    /// This is the key to getting immediate feedback during long-running tasks like browsing.
+    /// </summary>
+    private async Task HandleToolExecutionUpdateAsync(JsonNode data)
+    {
+        var toolName = data["toolName"]?.GetValue<string>();
+        var partialResult = data["partialResult"];
+
+        if (partialResult == null) return;
+
+        // Find the oldest pending request
+        if (!_pendingRequests.Any()) return;
+
+        var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).First();
+        var requestId = oldestRequest.Key;
+        var pendingRequest = oldestRequest.Value;
+
+        // Extract the partial content from the tool
+        var content = partialResult["content"];
+        if (content == null) return;
+
+        var sb = new StringBuilder();
+        if (content is JsonArray arr)
+        {
+            foreach (var block in arr)
+            {
+                var type = block?["type"]?.GetValue<string>();
+                if (type == "text")
+                {
+                    sb.Append(block?["text"]?.GetValue<string>());
+                }
+            }
+        }
+
+        var toolOutput = sb.ToString();
+        if (string.IsNullOrEmpty(toolOutput)) return;
+
+        // Append to buffer and flush if needed
+        var buffer = _responseBuffers.AddOrUpdate(requestId,
+            new StringBuilder(toolOutput),
+            (_, existing) => existing.Append(toolOutput));
+
+        // Flush more frequently for tool output (lower threshold)
+        var toolFlushThreshold = 500; // Lower threshold for tool output
+        if (buffer.Length >= toolFlushThreshold)
+        {
+            var textToSend = buffer.ToString();
+            buffer.Clear();
+
+            var sentMessage = await SendStreamChunkToDiscordAsync(pendingRequest, 
+                $"⚙️ **{toolName}** output:\n{textToSend}", isFirst: false);
+            
+            _logger.LogDebug("Streamed tool output ({Length} chars) to Discord", textToSend.Length);
+        }
+    }
+
+    /// <summary>
+    /// Notifies Discord about tool execution start/end.
+    /// </summary>
+    private async Task NotifyToolExecutionAsync(JsonNode data, bool isStart)
+    {
+        if (!_pendingRequests.Any()) return;
+
+        var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).First();
+        var pendingRequest = oldestRequest.Value;
+
+        var toolName = data["toolName"]?.GetValue<string>();
+        var statusMessage = isStart 
+            ? $"🔧 **{toolName}** starting..."
+            : $"✅ **{toolName}** completed";
+
+        try
+        {
+            if (pendingRequest.Channel is SocketDMChannel dmChannel)
+            {
+                await dmChannel.SendMessageAsync(statusMessage);
+            }
+            else if (pendingRequest.Channel is ITextChannel textChannel)
+            {
+                await textChannel.SendMessageAsync(statusMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send tool execution notification");
         }
     }
 
