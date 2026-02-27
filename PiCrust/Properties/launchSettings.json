@@ -2,10 +2,12 @@
   "profiles": {
     "Container (Dockerfile)": {
       "commandName": "Docker",
-      "containerRunEnvironmentFiles": "PiCrust\\.env",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
-      }
+      },
+      "containerRunEnvironmentFiles": "PiCrust\\.env",
+      "publishAllPorts": true,
+      "containerRunArguments": "-p 18789:18789"
     }
   }
 }

@@ -48,7 +48,13 @@ public class Program
             // Provider/Model configuration - supports "provider/model" format via PI_MODEL
             // or separate PI_PROVIDER and PI_MODEL env vars
             PiProvider = configuration["PI_PROVIDER"] ?? string.Empty,
-            PiModel = configuration["PI_MODEL"] ?? string.Empty
+            PiModel = configuration["PI_MODEL"] ?? string.Empty,
+            
+            // Rabbit R1 Gateway configuration
+            RabbitGatewayEnabled = configuration["RABBIT_GATEWAY_ENABLED"]?.ToLowerInvariant() == "true",
+            RabbitGatewayPort = int.TryParse(configuration["RABBIT_GATEWAY_PORT"], out var port) ? port : 18789,
+            RabbitGatewayToken = configuration["RABBIT_GATEWAY_TOKEN"] ?? string.Empty,
+            RabbitAutoApprove = configuration["RABBIT_AUTO_APPROVE"]?.ToLowerInvariant() == "true"
         };
         
         // Handle "provider/model" format in PI_MODEL (e.g., "anthropic/claude-sonnet-20241022")
@@ -119,6 +125,16 @@ public class Program
 
                 // Background services - receive singletons via constructor injection
                 services.AddHostedService<HeartbeatService>();
+                
+                // Rabbit R1 Gateway service
+                services.AddSingleton<RabbitGatewayService>(sp =>
+                {
+                    var logger = sp.GetRequiredService<ILogger<RabbitGatewayService>>();
+                    var config = sp.GetRequiredService<Configuration>();
+                    var piService = sp.GetRequiredService<PiService>();
+                    return new RabbitGatewayService(logger, config, piService);
+                });
+                services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<RabbitGatewayService>());
             })
             .ConfigureLogging(logging =>
             {

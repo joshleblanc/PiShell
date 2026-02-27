@@ -29,6 +29,7 @@ ENV PI_CODING_AGENT_DIR=/app/AgentFiles
 
 EXPOSE 8080
 EXPOSE 8081
+EXPOSE 18789
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIG=Release
