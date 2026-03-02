@@ -166,7 +166,9 @@ public class DiscordService(
         if (oldestRequest.Value == null) return;
 
         var message = data["message"];
-        if (message["role"].GetValue<string>() != "assistant")
+        if (message == null) return;
+
+        if (message["role"]?.GetValue<string>() != "assistant")
         {
             return;
         }
@@ -178,15 +180,20 @@ public class DiscordService(
             return;
         }
 
-        var content = message["content"].AsArray();
-        var text = content.First(c => c["type"].GetValue<string>() == "text");
-        if(text == null)
+        var content = message["content"]?.AsArray();
+        var text = content?.FirstOrDefault(c => c?["type"]?.GetValue<string>() == "text");
+        if (text == null)
         {
             return;
         }
 
+        var textContent = text["text"]?.GetValue<string>();
+        if(textContent == null)
+        {
+            return;
+        }
 
-        SendMessageToDMChannelAsync((SocketDMChannel)oldestRequest.Value.Channel!, text["text"].GetValue<string>()).Wait();
+        SendMessageToDMChannelAsync((SocketDMChannel)oldestRequest.Value.Channel!, textContent).Wait();
     }
 
     private async Task HandlePiEventAsync(PiEvent evt)
