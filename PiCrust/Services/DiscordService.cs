@@ -40,12 +40,7 @@ public class DiscordService(
     private IDisposable? _typing;
 
     // Track whether a runtime reload is needed after the current agent run
-    private bool _reloadNeeded = false;
-
-    // Streaming configuration
-    private const int FlushThreshold = 500; // Characters before flushing a chunk (lowered for more responsive streaming)
-    private const int MinChunkSize = 100;    // Minimum chunk size to avoid too many small messages
-    
+    private bool _reloadNeeded = false;    
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -114,14 +109,9 @@ public class DiscordService(
         _pendingRequests[message.Id] = pendingRequest;
         _responseBuffers[message.Id] = new StringBuilder();
 
-        // Extract images if any
         var images = await ExtractImagesAsync(userMessage);
 
-        // Send to pi - runs asynchronously, events stream to Discord in real-time
         await _piClient.SendPromptFireAndForgetAsync(userMessage.Content, images);
-        
-        // Don't wait for agent_end - let it run in background
-        // The events will still stream via OnEvent handler
     }
 
     private bool ShouldRespond(SocketUserMessage message)
@@ -139,24 +129,6 @@ public class DiscordService(
         {
             return false;
         }
-
-
-        //// Direct mentions
-        //if (message.MentionedUsers.Any(u => u.Id == _client.CurrentUser?.Id))
-        //    return true;
-
-        //// Command prefix
-        //if (!string.IsNullOrEmpty(_settings.CommandPrefix) &&
-        //    message.Content.StartsWith(_settings.CommandPrefix))
-        //    return true;
-        //// If configured to respond to all messages in a specific channel
-        //if (!string.IsNullOrEmpty(_settings.ChannelId))
-        //{
-        //    if (message.Channel.Id.ToString() == _settings.ChannelId)
-        //        return true;
-        //}
-
-        //return false;
     }
 
     private async Task<List<PiImage>> ExtractImagesAsync(SocketUserMessage message)
@@ -187,15 +159,48 @@ public class DiscordService(
         return images;
     }
 
+    private async Task HandleTurnEndAsync(JsonNode data)
+    {
+
+        var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).FirstOrDefault();
+        if (oldestRequest.Value == null) return;
+
+        var message = data["message"];
+        if (message["role"].GetValue<string>() != "assistant")
+        {
+            return;
+        }
+
+        var customType = message["customType"]?.GetValue<string>();
+        if (customType == "discord_reaction")
+        {
+            await ProcessDiscordReactionMessageAsync(message, oldestRequest.Value);
+            return;
+        }
+
+        var content = message["content"].AsArray();
+        var text = content.First(c => c["type"].GetValue<string>() == "text");
+        if(text == null)
+        {
+            return;
+        }
+
+
+        SendMessageToDMChannelAsync((SocketDMChannel)oldestRequest.Value.Channel!, text["text"].GetValue<string>()).Wait();
+    }
+
     private async Task HandlePiEventAsync(PiEvent evt)
     {
         switch (evt.Type)
         {
             case "message_update":
-                await HandleMessageUpdateAsync(evt.Data);
+                //await HandleMessageUpdateAsync(evt.Data);
                 break;
             case "agent_end":
                 await HandleAgentEndAsync(evt.Data);
+                break;
+            case "turn_end":
+                await HandleTurnEndAsync(evt.Data);
                 break;
             case "tool_execution_start":
             case "tool_execution_end":
@@ -203,140 +208,6 @@ public class DiscordService(
                 _logger.LogDebug("Tool execution: {Tool}", evt.Data["toolName"]);
                 break;
         }
-    }
-
-    private void HandleToolExecutionEnd(JsonNode data)
-    {
-        var toolName = data["toolName"]?.GetValue<string>();
-        var isError = data["isError"]?.GetValue<bool>() ?? true;
-
-        _logger.LogDebug("Tool execution completed: {Tool} (error: {IsError})", toolName, isError);
-
-        if (!isError && toolName is "install_package" or "uninstall_package" or "update_packages" or "reload_runtime")
-        {
-            _reloadNeeded = true;
-            _logger.LogDebug("Runtime reload will be triggered after agent completes");
-        }
-    }
-
-    private async Task HandleMessageUpdateAsync(JsonNode data)
-    {
-        var assistantEvent = data["assistantMessageEvent"];
-        if (assistantEvent == null) return;
-
-        var eventType = assistantEvent["type"]?.GetValue<string>();
-        if (eventType != "text_delta") return;
-
-        var delta = assistantEvent["delta"]?.GetValue<string>() ?? "";
-
-        // Find the oldest pending request and append to its buffer
-        var oldestRequest = _pendingRequests.OrderBy(kvp => kvp.Value.StartedAt).FirstOrDefault();
-        if (oldestRequest.Value == null) return;
-
-        var requestId = oldestRequest.Key;
-        var pendingRequest = oldestRequest.Value;
-
-        // Append to buffer
-        var buffer = _responseBuffers.AddOrUpdate(requestId,
-            new StringBuilder(delta),
-            (_, existing) => existing.Append(delta));
-
-        var currentLength = buffer.Length;
-
-        // Stream to Discord if we've accumulated enough content
-        if (currentLength >= FlushThreshold)
-        {
-            // Find any existing Discord messages for this request
-            var existingMessageIds = _discordMessagesToRequests
-                .Where(kvp => kvp.Value == requestId)
-                .Select(kvp => kvp.Key)
-                .ToList();
-
-            string textToSend;
-
-            if (existingMessageIds.Count == 0)
-            {
-                // First message - send as reply or new message
-                textToSend = buffer.ToString();
-                buffer.Clear();
-
-                var sentMessage = await SendStreamChunkToDiscordAsync(pendingRequest, textToSend, isFirst: true);
-                if (sentMessage != null)
-                {
-                    _discordMessagesToRequests[sentMessage.Id] = requestId;
-                }
-
-                // Stop typing briefly to show message was received, then restart
-                _typing?.Dispose();
-                _typing = null;
-                _typing ??= pendingRequest.Channel?.EnterTypingState();
-            }
-            else
-            {
-                // Subsequent chunks - send as follow-up messages
-                textToSend = buffer.ToString();
-                buffer.Clear();
-
-                var sentMessage = await SendStreamChunkToDiscordAsync(pendingRequest, textToSend, isFirst: false);
-                if (sentMessage != null)
-                {
-                    _discordMessagesToRequests[sentMessage.Id] = requestId;
-                }
-            }
-
-            _logger.LogDebug("Streamed chunk ({Length} chars) to Discord", textToSend.Length);
-        }
-    }
-
-    private async Task<IMessage?> SendStreamChunkToDiscordAsync(PendingRequest request, string text, bool isFirst)
-    {
-        try
-        {
-            // DM Channel
-            if (request.Channel is SocketDMChannel dmChannel)
-            {
-                if (isFirst)
-                {
-                    return await dmChannel.SendMessageAsync(text);
-                }
-                else
-                {
-                    return await dmChannel.SendMessageAsync(text);
-                }
-            }
-
-            // Try to reply to the original message first (for first chunk only)
-            if (isFirst && request.OriginalMessage != null)
-            {
-                try
-                {
-                    return await request.OriginalMessage.ReplyAsync(text);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to reply to original message, trying channel");
-                }
-            }
-
-            // Fall back to channel
-            if (request.Channel is ITextChannel textChannel)
-            {
-                return await textChannel.SendMessageAsync(text);
-            }
-
-            // Last resort - any channel
-            if (request.Channel != null)
-            {
-                var result = await request.Channel.SendMessageAsync(text);
-                return result;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to send stream chunk to Discord");
-        }
-
-        return null;
     }
 
     private async Task HandleAgentEndAsync(JsonNode data)
@@ -357,80 +228,6 @@ public class DiscordService(
                 .Where(kvp => kvp.Value == requestId)
                 .Select(kvp => kvp.Key)
                 .ToList();
-
-            // Process any custom messages (like discord_reaction)
-            var messages = data["messages"]?.AsArray();
-            if (messages != null)
-            {
-                foreach (var message in messages)
-                {
-                    if (message == null) continue;
-                    
-                    var customType = message["customType"]?.GetValue<string>();
-                    if (customType == "discord_reaction")
-                    {
-                        await ProcessDiscordReactionMessageAsync(message, pendingRequest);
-                    }
-                }
-            }
-
-            // Get any remaining buffered content that wasn't streamed yet
-            string? remainingContent = null;
-            if (_responseBuffers.TryRemove(requestId, out var buffer) && buffer.Length > 0)
-            {
-                remainingContent = buffer.ToString();
-            }
-
-            if (existingMessageIds.Any())
-            {
-                // We've been streaming - send any remaining content as a follow-up
-                if (!string.IsNullOrEmpty(remainingContent))
-                {
-                    try
-                    {
-                        _logger.LogInformation("Sending final streaming chunk ({Length} chars)", remainingContent.Length);
-                        await SendStreamChunkToDiscordAsync(pendingRequest, remainingContent, isFirst: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to send final streaming chunk");
-                    }
-                }
-                else
-                {
-                    _logger.LogDebug("No remaining content to send after streaming");
-                }
-            }
-            else if (!string.IsNullOrEmpty(remainingContent) || (messages != null))
-            {
-                // No streaming happened (response was small) - send everything at once
-                var finalResponse = remainingContent ?? "";
-                
-                if (messages != null && string.IsNullOrEmpty(finalResponse))
-                {
-                    // Try to get text from assistant message if nothing in buffer
-                    var assistantMessage = messages.LastOrDefault(m =>
-                        m?["role"]?.GetValue<string>() == "assistant");
-                    
-                    if (assistantMessage != null)
-                    {
-                        finalResponse = ExtractTextContent(assistantMessage);
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(finalResponse))
-                {
-                    _logger.LogInformation("pi response: {Response}", Truncate(finalResponse, 200));
-                    try
-                    {
-                        await SendResponseToDiscordAsync(pendingRequest, finalResponse);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Failed to send response to Discord");
-                    }
-                }
-            }
 
             // Clean up tracking for this request
             foreach (var msgId in existingMessageIds)
@@ -513,51 +310,6 @@ public class DiscordService(
         }
     }
 
-    private async Task SendResponseToDiscordAsync(PendingRequest request, string response)
-    {
-        // DM Channel - use SocketDMChannel directly
-        if (request.Channel is SocketDMChannel dmChannel)
-        {
-            await SendMessageToDMChannelAsync(dmChannel, response);
-            return;
-        }
-
-        // Try to reply to the original message first
-        if (request.OriginalMessage != null)
-        {
-            try
-            {
-                await request.OriginalMessage.ReplyAsync(response);
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to reply to original message, trying channel");
-            }
-        }
-
-        // Fall back to last used channel (for heartbeats or lost context)
-        if (_lastChannel != null)
-        {
-            _logger.LogDebug("Falling back to last used channel: {ChannelId}", _lastChannel.Id);
-            if (_lastChannel is SocketDMChannel fallbackDmChannel)
-            {
-                await SendMessageToDMChannelAsync(fallbackDmChannel, response);
-            }
-            else if (_lastChannel is ITextChannel fallbackTextChannel)
-            {
-                await SendMessageToTextChannelAsync(fallbackTextChannel, response);
-            }
-            return;
-        }
-
-        // Fall back to sending in the channel (guild text channels)
-        if (request.Channel is ITextChannel textChannel)
-        {
-            await SendMessageToTextChannelAsync(textChannel, response);
-        }
-    }
-
     private async Task SendMessageToDMChannelAsync(SocketDMChannel dmChannel, string response)
     {
         const int maxLength = 2000;
@@ -578,52 +330,6 @@ public class DiscordService(
                 await Task.Delay(100);
             }
         }
-    }
-
-    private async Task SendMessageToTextChannelAsync(ITextChannel textChannel, string response)
-    {
-        const int maxLength = 2000;
-        if (response.Length <= maxLength)
-        {
-            await textChannel.SendMessageAsync(response);
-        }
-        else
-        {
-            // Split into chunks
-            var chunks = SplitMessage(response, maxLength);
-            foreach (var chunk in chunks)
-            {
-                await textChannel.SendMessageAsync(chunk);
-                // Small delay between chunks to avoid rate limiting
-                await Task.Delay(100);
-            }
-        }
-    }
-
-    private static string ExtractTextContent(JsonNode message)
-    {
-        var content = message["content"];
-        if (content == null) return string.Empty;
-
-        var sb = new StringBuilder();
-
-        if (content is JsonArray arr)
-        {
-            foreach (var block in arr)
-            {
-                var type = block?["type"]?.GetValue<string>();
-                if (type == "text")
-                {
-                    sb.Append(block?["text"]?.GetValue<string>());
-                }
-            }
-        }
-        else if (content is JsonValue val)
-        {
-            sb.Append(val.GetValue<string>());
-        }
-
-        return sb.ToString();
     }
 
     private static IEnumerable<string> SplitMessage(string message, int maxLength)
