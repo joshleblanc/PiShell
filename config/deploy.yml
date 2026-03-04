@@ -25,6 +25,7 @@ env:
   clear:
     PI_CODING_AGENT_DIR: /home/picrust
     ASPNETCORE_ENVIRONMENT: Production
+    HEARTBEAT_INTERVAL: 5
 
 builder:
   context: PiCrust
@@ -36,6 +37,7 @@ aliases:
   shell: app exec --interactive --reuse "bash"
   logs: app logs -f
   agent-files: app exec --interactive --reuse "ls -la /home/picrust/"
+  ssh: server exec --interactive "bash"
 
 # Build args passed to docker buildx build
 # build_args:

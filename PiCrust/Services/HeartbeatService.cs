@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using PiCrust.Models;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace PiCrust.Services;
 
@@ -217,6 +218,45 @@ public class HeartbeatService(
 
             _logger.LogDebug("Heartbeat response received: {Length} chars", response.Length);
 
+            // OpenClaw-style filtering: check for HEARTBEAT_OK
+            // Strip markdown formatting (bold, italic, etc.) before checking
+            var strippedResponse = StripMarkdown(response.Trim());
+            
+            // Check if the response is exactly HEARTBEAT_OK or starts/ends with it
+            // and the remaining content is short (ackMaxChars: 300 chars)
+            const int ackMaxChars = 300;
+            var isHeartbeatOk = strippedResponse.Equals("HEARTBEAT_OK", StringComparison.OrdinalIgnoreCase);
+            
+            if (isHeartbeatOk)
+            {
+                _logger.LogDebug("Heartbeat check complete - nothing needs attention, skipping delivery");
+                return;
+            }
+            
+            // Check if response starts with HEARTBEAT_OK and the rest is short
+            if (strippedResponse.StartsWith("HEARTBEAT_OK", StringComparison.OrdinalIgnoreCase))
+            {
+                var contentAfterAck = strippedResponse["HEARTBEAT_OK".Length..].Trim();
+                if (string.IsNullOrEmpty(contentAfterAck) || contentAfterAck.Length <= ackMaxChars)
+                {
+                    _logger.LogDebug("Heartbeat check complete - HEARTBEAT_OK with minimal content, skipping delivery");
+                    return;
+                }
+                // Use content after HEARTBEAT_OK as the actual response
+                response = contentAfterAck;
+            }
+            else if (strippedResponse.EndsWith("HEARTBEAT_OK", StringComparison.OrdinalIgnoreCase))
+            {
+                var contentBeforeAck = strippedResponse[..^"HEARTBEAT_OK".Length].Trim();
+                if (string.IsNullOrEmpty(contentBeforeAck) || contentBeforeAck.Length <= ackMaxChars)
+                {
+                    _logger.LogDebug("Heartbeat check complete - HEARTBEAT_OK at end with minimal content, skipping delivery");
+                    return;
+                }
+                // Use content before HEARTBEAT_OK as the actual response
+                response = contentBeforeAck;
+            }
+
             // Send response to the tracked heartbeat channel
             if (_heartbeatChannel != null)
             {
@@ -298,6 +338,33 @@ public class HeartbeatService(
 
         if (currentChunk.Length > 0)
             yield return currentChunk.ToString();
+    }
+
+    /// <summary>
+    /// Strips common markdown formatting from text.
+    /// Handles bold (**text**), italic (*text* or _text_), strikethrough (~~text~~), and code (`text`).
+    /// </summary>
+    private static string StripMarkdown(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+
+        // Bold: **text** or __text__
+        text = Regex.Replace(text, @"\*\*(.+?)\*\*", "$1");
+        text = Regex.Replace(text, @"__(.+?)__", "$1");
+
+        // Italic: *text* or _text_ (being careful not to match **)
+        text = Regex.Replace(text, @"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", "$1");
+        text = Regex.Replace(text, @"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", "$1");
+
+        // Strikethrough: ~~text~~
+        text = Regex.Replace(text, @"~~(.+?)~~", "$1");
+
+        // Code: `code` or ```code```
+        text = Regex.Replace(text, @"`(.+?)`", "$1");
+        text = Regex.Replace(text, @"```(.+?)```", "$1");
+
+        return text;
     }
 
     private string GetHeartbeatPrompt()
