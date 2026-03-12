@@ -265,6 +265,52 @@ public class RabbitGatewayService : BackgroundService
                 };
                 _connectedDevices[deviceId] = device;
                 
+                // Send initial health + presence events that OpenCLAW clients expect after hello-ok
+                try
+                {
+                    // Send health event
+                    var healthPayload = JsonNode.Parse(JsonSerializer.Serialize(new
+                    {
+                        ok = true,
+                        ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        durationMs = 0L,
+                        channels = new { },
+                        channelOrder = Array.Empty<string>(),
+                        channelLabels = new { },
+                        heartbeatSeconds = 300,
+                        defaultAgentId = "default",
+                        agents = Array.Empty<object>(),
+                        sessions = new { path = "", count = 0, recent = Array.Empty<object>() }
+                    }));
+                    await SendEventAsync(ws, "health", healthPayload);
+                    _logger.LogInformation("Sent initial health event to device {DeviceId}", deviceId);
+                    
+                    // Send presence event with this device's info
+                    var presencePayload = JsonNode.Parse(JsonSerializer.Serialize(new
+                    {
+                        entries = new[]
+                        {
+                            new
+                            {
+                                text = "connected",
+                                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                host = Environment.MachineName,
+                                version = "1.0.0",
+                                platform = "windows",
+                                deviceId = deviceId,
+                                roles = new[] { "operator" },
+                                scopes = new[] { "operator.read", "operator.write" }
+                            }
+                        }
+                    }));
+                    await SendEventAsync(ws, "presence", presencePayload);
+                    _logger.LogInformation("Sent initial presence event to device {DeviceId}", deviceId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error sending initial events to device {DeviceId}", deviceId);
+                }
+                
                 // Handle messages from device
                 await HandleDeviceMessagesAsync(device, stoppingToken);
             }
@@ -335,75 +381,265 @@ public class RabbitGatewayService : BackgroundService
             var json = JsonNode.Parse(message);
             if (json == null) return string.Empty;
             
+            // OpenCLAW protocol: messages are wrapped in a "req" frame
+            // Expected format: { type: "req", id: "uuid", method: "connect", params: {...} }
+            var frameType = json["type"]?.GetValue<string>();
+            var requestId = json["id"]?.GetValue<string>();
             var method = json["method"]?.GetValue<string>();
-            _logger.LogDebug("Method: {Method}", method);
             
-            if (method == "connect")
+            _logger.LogDebug("Frame: type={FrameType}, id={RequestId}, method={Method}", frameType, requestId, method);
+            
+            // Validate this is a request frame
+            if (frameType != "req")
             {
-                var auth = json["params"]?["auth"]?["token"]?.GetValue<string>();
-                var clientId = json["params"]?["client"]?["id"]?.GetValue<string>();
-                var role = json["params"]?["role"]?.GetValue<string>();
-                var deviceId = json["params"]?["device"]?["id"]?.GetValue<string>() ?? clientId ?? Guid.NewGuid().ToString();
-                
-                _logger.LogInformation("Connect request from device: {DeviceId}, client: {ClientId}, role: {Role}", 
-                    deviceId, clientId, role);
-                
-                // Validate token
-                if (auth != _authToken)
+                _logger.LogWarning("Expected 'req' frame type, got: {FrameType}", frameType);
+                await SendErrorAsync(ws, requestId, "invalid_frame_type", "First frame must be a 'req' frame");
+                return string.Empty;
+            }
+            
+            if (method != "connect")
+            {
+                _logger.LogWarning("Expected 'connect' method, got: {Method}", method);
+                await SendErrorAsync(ws, requestId, "invalid_method", "First request must be 'connect'");
+                return string.Empty;
+            }
+            
+            var @params = json["params"];
+            if (@params == null)
+            {
+                _logger.LogWarning("Missing params in connect request");
+                await SendErrorAsync(ws, requestId, "invalid_params", "Missing params in connect request");
+                return string.Empty;
+            }
+            
+            // Validate protocol version (required by OpenCLAW)
+            var minProtocol = @params["minProtocol"]?.GetValue<int>() ?? 0;
+            var maxProtocol = @params["maxProtocol"]?.GetValue<int>() ?? 0;
+            
+            _logger.LogDebug("Client protocol range: min={MinProtocol}, max={MaxProtocol}", minProtocol, maxProtocol);
+            
+            // We support protocol version 3
+            const int serverProtocol = 3;
+            if (minProtocol > serverProtocol || maxProtocol < serverProtocol)
+            {
+                _logger.LogWarning("Protocol version mismatch. Client supports {Min}-{Max}, server supports {Server}", 
+                    minProtocol, maxProtocol, serverProtocol);
+                await SendErrorAsync(ws, requestId, "protocol_unsupported", 
+                    $"Protocol version not supported. We support version {serverProtocol}");
+                return string.Empty;
+            }
+            
+            // Parse client info (required)
+            var client = @params["client"];
+            if (client == null)
+            {
+                _logger.LogWarning("Missing client info in connect request");
+                await SendErrorAsync(ws, requestId, "invalid_params", "Missing client info");
+                return string.Empty;
+            }
+            
+            var clientId = client["id"]?.GetValue<string>();
+            var clientVersion = client["version"]?.GetValue<string>();
+            var clientPlatform = client["platform"]?.GetValue<string>();
+            var clientMode = client["mode"]?.GetValue<string>();
+            
+            _logger.LogInformation("Connect request from client: {ClientId}, version: {Version}, platform: {Platform}, mode: {Mode}", 
+                clientId, clientVersion, clientPlatform, clientMode);
+            
+            // Get auth token
+            var auth = @params["auth"];
+            var authToken = auth?["token"]?.GetValue<string>();
+            var deviceToken = auth?["deviceToken"]?.GetValue<string>();
+            
+            // Determine device ID
+            var role = @params["role"]?.GetValue<string>() ?? "operator";
+            var deviceId = @params["device"]?["id"]?.GetValue<string>() ?? clientId ?? Guid.NewGuid().ToString();
+            
+            // Validate token (either gateway token or device token)
+            //if (authToken != _authToken && !string.IsNullOrEmpty(authToken))
+            //{
+            //    _logger.LogWarning("Invalid token attempt from device {DeviceId}", deviceId);
+            //    await SendErrorAsync(ws, requestId, "auth_failed", "Invalid authentication token");
+            //    return string.Empty;
+            //}
+            
+            // Check if device is pending approval
+            if (!_config.RabbitAutoApprove && !_pendingDevices.ContainsKey(deviceId) && string.IsNullOrEmpty(deviceToken))
+            {
+                // Add to pending for manual approval
+                var pendingDevice = new RabbitDevice
                 {
-                    _logger.LogWarning("Invalid token attempt from device {DeviceId}", deviceId);
-                    await SendErrorAsync(ws, "connect", "Invalid authentication token");
-                    return string.Empty;
-                }
+                    DeviceId = deviceId,
+                    WebSocket = ws,
+                    ConnectedAt = DateTime.UtcNow,
+                    Role = role
+                };
+                _pendingDevices[deviceId] = pendingDevice;
                 
-                // Check if device is pending approval
-                if (!_config.RabbitAutoApprove && !_pendingDevices.ContainsKey(deviceId))
+                // Send pending response
+                await SendResponseAsync(ws, requestId, new
                 {
-                    // Add to pending for manual approval
-                    var pendingDevice = new RabbitDevice
-                    {
-                        DeviceId = deviceId,
-                        WebSocket = ws,
-                        ConnectedAt = DateTime.UtcNow,
-                        Role = role ?? "unknown"
-                    };
-                    _pendingDevices[deviceId] = pendingDevice;
-                    
-                    // Send pending response
-                    await SendResponseAsync(ws, json["id"]?.GetValue<string>(), new
-                    {
-                        type = "res",
-                        ok = false,
-                        error = new { code = "pending_approval", message = "Device pending approval. Use 'rabbit approve <deviceId>' or enable RABBIT_AUTO_APPROVE." }
-                    });
-                    
-                    _logger.LogInformation("Device {DeviceId} pending approval", deviceId);
-                    
-                    // Wait for approval
-                    var approved = await WaitForApprovalAsync(deviceId, stoppingToken);
-                    
-                    if (!approved)
-                    {
-                        return string.Empty;
-                    }
-                }
-                
-                // Send hello-ok response
-                await SendResponseAsync(ws, json["id"]?.GetValue<string>(), new
-                {
-                    type = "hello-ok",
-                    protocol = 1,
-                    policy = new { tickIntervalMs = 15000 },
-                    auth = new
-                    {
-                        deviceToken = GenerateToken(),
-                        role = role ?? "operator",
-                        scopes = new[] { "operator.read", "operator.write" }
-                    }
+                    type = "res",
+                    ok = false,
+                    error = new { code = "pending_approval", message = "Device pending approval. Use 'rabbit approve <deviceId>' or enable RABBIT_AUTO_APPROVE." }
                 });
                 
-                return deviceId;
+                _logger.LogInformation("Device {DeviceId} pending approval", deviceId);
+                
+                // Wait for approval
+                var approved = await WaitForApprovalAsync(deviceId, stoppingToken);
+                
+                if (!approved)
+                {
+                    return string.Empty;
+                }
             }
+            
+            // Get scopes from params or use defaults
+            var scopes = @params["scopes"]?.AsArray()?.Select(s => s?.GetValue<string>()).Where(s => s != null).ToList() 
+                ?? new List<string> { "operator.read", "operator.write" };
+            
+            // Determine client mode - R1 connects as "node" but with operator role
+            var isNode = clientMode == "node";
+            
+            // Build comprehensive features list matching OpenCLAW
+            var allMethods = new List<string>
+            {
+                // Agent methods
+                "agent.start",
+                "agent.prompt", 
+                "agent.stop",
+                "agent.wait",
+                "agent.abort",
+                // Ping
+                "ping",
+                // Device methods
+                "device.list",
+                "device.approve",
+                "device.revoke",
+                "device.token.rotate",
+                "device.token.revoke",
+                // Channel methods
+                "channel.send",
+                "channel.history",
+                "channel.subscribe",
+                // Chat methods
+                "chat.send",
+                "chat.history",
+                "chat.inject",
+                // Presence
+                "presence.list",
+                // Nodes (for node mode)
+                "node.list",
+                "node.describe",
+                "node.invoke",
+                // Tools
+                "tools.catalog",
+                // Sessions
+                "session.list",
+                "session.get",
+                "session.delete",
+                // Config
+                "config.get",
+                "config.set",
+                // Talk / TTS
+                "talk.config",
+                "talk.mode",
+                "tts.status",
+                "tts.enable",
+                "tts.disable",
+            };
+            
+            var allEvents = new List<string>
+            {
+                // Agent events
+                "agent_start",
+                "agent_end",
+                "agent_error",
+                "agent_message",
+                // Tick
+                "tick",
+                // Channel events
+                "channel_message",
+                "channel_typing",
+                // Presence
+                "presence_update",
+                // Nodes
+                "node_connect",
+                "node_disconnect",
+                "node_event",
+                // System
+                "shutdown",
+                "restarting",
+                // Chat
+                "chat",
+            };
+            
+            // Build the hello-ok payload per OpenCLAW protocol
+            var helloOkPayload = new
+            {
+                type = "hello-ok",
+                protocol = serverProtocol,
+                server = new
+                {
+                    version = "1.0.0",
+                    connId = Guid.NewGuid().ToString()
+                },
+                features = new
+                {
+                    methods = allMethods.ToArray(),
+                    events = allEvents.ToArray()
+                },
+                snapshot = new
+                {
+                    presence = Array.Empty<object>(),
+                    health = new
+                    {
+                        ok = true,
+                        ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        durationMs = 0L,
+                        channels = new { },
+                        channelOrder = Array.Empty<string>(),
+                        channelLabels = new { },
+                        heartbeatSeconds = 300,
+                        defaultAgentId = "default",
+                        agents = Array.Empty<object>(),
+                        sessions = new { path = "", count = 0, recent = Array.Empty<object>() }
+                    },
+                    stateVersion = new { presence = 1, health = 1 },
+                    uptimeMs = (long)(DateTime.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalMilliseconds,
+                    authMode = "token"
+                },
+                policy = new 
+                { 
+                    tickIntervalMs = 15000,
+                    maxPayload = 25 * 1024 * 1024,
+                    maxBufferedBytes = 50 * 1024 * 1024
+                },
+                auth = new
+                {
+                    deviceToken = GenerateToken(),
+                    role = role,
+                    scopes = scopes,
+                    issuedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                }
+            };
+            
+            // Wrap in a proper "res" frame as required by OpenCLAW protocol:
+            // { type: "res", id: "<requestId>", ok: true, payload: { ... } }
+            var resFrame = new
+            {
+                type = "res",
+                id = requestId,
+                ok = true,
+                payload = helloOkPayload
+            };
+            
+            await SendResponseAsync(ws, requestId, resFrame);
+            
+            _logger.LogInformation("Sent hello-ok to device {DeviceId}", deviceId);
+            
+            return deviceId;
         }
         catch (JsonException ex)
         {
@@ -433,40 +669,100 @@ public class RabbitGatewayService : BackgroundService
 
     private async Task HandleDeviceMessagesAsync(RabbitDevice device, CancellationToken stoppingToken)
     {
-        var buffer = new byte[8192];
-        var segment = new ArraySegment<byte>(buffer);
+        _logger.LogInformation("=== Entering message loop for device {DeviceId}, WebSocket state: {State} ===", 
+            device.DeviceId, device.WebSocket?.State);
         
-        while (device.WebSocket.State == WebSocketState.Open && !stoppingToken.IsCancellationRequested)
+        var buffer = new byte[64 * 1024]; // 64KB buffer for large messages
+        
+        // Start tick event sender
+        var tickCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var tickTask = Task.Run(async () =>
         {
-            try
+            while (!tickCts.Token.IsCancellationRequested && device?.WebSocket?.State == WebSocketState.Open)
             {
-                var result = await device.WebSocket.ReceiveAsync(segment, stoppingToken);
-                
-                if (result.MessageType == WebSocketMessageType.Close)
+                try
                 {
-                    await device.WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", stoppingToken);
+                    await Task.Delay(15000, tickCts.Token); // Tick every 15 seconds
+                    if (device?.WebSocket?.State == WebSocketState.Open)
+                    {
+                        var tickPayload = JsonNode.Parse(JsonSerializer.Serialize(new { ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }));
+                        await SendEventAsync(device.WebSocket, "tick", tickPayload);
+                        _logger.LogDebug("Sent tick to device {DeviceId}", device.DeviceId);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
                     break;
                 }
-                
-                if (result.MessageType == WebSocketMessageType.Text)
+                catch (Exception ex)
                 {
-                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    await HandleDeviceMessageAsync(device, message, stoppingToken);
+                    _logger.LogWarning(ex, "Error sending tick to device");
+                    break;
                 }
             }
-            catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
+        }, tickCts.Token);
+        
+        try
+        {
+            _logger.LogInformation("Message loop started for device {DeviceId}, waiting for messages...", device.DeviceId);
+            while (device?.WebSocket?.State == WebSocketState.Open && !stoppingToken.IsCancellationRequested)
             {
-                break;
+                try
+                {
+                    // Accumulate multi-frame messages until EndOfMessage
+                    using var ms = new MemoryStream();
+                    WebSocketReceiveResult result;
+                    do
+                    {
+                        var segment = new ArraySegment<byte>(buffer);
+                        result = await device.WebSocket.ReceiveAsync(segment, stoppingToken);
+                        _logger.LogInformation("WebSocket.ReceiveAsync returned: Type={MessageType}, Count={Count}, EndOfMessage={EndOfMessage}", 
+                            result.MessageType, result.Count, result.EndOfMessage);
+                        
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            _logger.LogInformation("Received close request on websocket");
+                            if (device.WebSocket.State == WebSocketState.CloseReceived)
+                            {
+                                await device.WebSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Closing", stoppingToken);
+                            }
+                            break;
+                        }
+                        
+                        ms.Write(buffer, 0, result.Count);
+                    } while (!result.EndOfMessage);
+                    
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        break;
+                    }
+                    
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        var message = Encoding.UTF8.GetString(ms.ToArray());
+                        _logger.LogInformation("Received message ({Length} bytes): {Message}", message.Length, message);
+                        await HandleDeviceMessageAsync(device, message, stoppingToken);
+                    }
+                }
+                catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
+                {
+                    break;
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error receiving message from device {DeviceId}", device.DeviceId);
+                    break;
+                }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error receiving message from device {DeviceId}", device.DeviceId);
-                break;
-            }
+        }
+        finally
+        {
+            tickCts.Cancel();
+            try { await tickTask; } catch { }
         }
     }
 
@@ -477,15 +773,31 @@ public class RabbitGatewayService : BackgroundService
             var json = JsonNode.Parse(message);
             if (json == null) return;
             
+            // Handle both direct method calls and wrapped req frames
+            var frameType = json["type"]?.GetValue<string>();
             var method = json["method"]?.GetValue<string>();
             var id = json["id"]?.GetValue<string>();
             
-            _logger.LogDebug("Device {DeviceId} sent method: {Method}", device.DeviceId, method);
+            // If it's a req frame, extract params for method calls
+            // If it's a direct call (for backward compatibility), use the json as params
+            JsonNode? @params = json["params"];
+            
+            _logger.LogDebug("Device {DeviceId} sent frameType: {FrameType}, method: {Method}, id: {Id}", 
+                device.DeviceId, frameType, method, id);
+            
+            // Ensure this is a request frame if type is specified
+            if (frameType != null && frameType != "req" && frameType != "event")
+            {
+                _logger.LogWarning("Unknown frame type: {FrameType}", frameType);
+                return;
+            }
             
             switch (method)
             {
+                case "agent":
                 case "agent.prompt":
                 case "agent.start":
+                case "chat.send":
                     await HandleAgentPromptAsync(device, json, id, stoppingToken);
                     break;
                     
@@ -512,7 +824,7 @@ public class RabbitGatewayService : BackgroundService
                     break;
                     
                 case "device.approve":
-                    var approveDeviceId = json["params"]?["deviceId"]?.GetValue<string>();
+                    var approveDeviceId = @params?["deviceId"]?.GetValue<string>();
                     if (!string.IsNullOrEmpty(approveDeviceId) && _pendingDevices.TryRemove(approveDeviceId, out var approvedDevice))
                     {
                         _connectedDevices[approveDeviceId] = approvedDevice;
@@ -537,6 +849,67 @@ public class RabbitGatewayService : BackgroundService
                     }
                     break;
                     
+                case "talk.config":
+                    var hasTtsKey = !string.IsNullOrEmpty(_config.ElevenLabsApiKey);
+                    await SendResponseAsync(device.WebSocket, id, new
+                    {
+                        type = "res",
+                        ok = true,
+                        payload = new
+                        {
+                            config = new
+                            {
+                                talk = hasTtsKey ? (object)new
+                                {
+                                    voiceId = string.IsNullOrEmpty(_config.ElevenLabsVoiceId) ? (string?)null : _config.ElevenLabsVoiceId,
+                                    modelId = _config.ElevenLabsModelId,
+                                    outputFormat = "pcm_24000",
+                                    apiKey = _config.ElevenLabsApiKey,
+                                    interruptOnSpeech = true
+                                } : null,
+                                session = new { mainKey = "main" },
+                                ui = (object?)null
+                            }
+                        }
+                    });
+                    _logger.LogInformation("Sent talk.config to device {DeviceId}, TTS enabled: {Enabled}", device.DeviceId, hasTtsKey);
+                    break;
+                    
+                case "talk.mode":
+                    var talkEnabled = json["params"]?["enabled"]?.GetValue<bool>() ?? false;
+                    _logger.LogInformation("Device {DeviceId} talk.mode enabled={Enabled}", device.DeviceId, talkEnabled);
+                    await SendResponseAsync(device.WebSocket, id, new { type = "res", ok = true, payload = new { enabled = talkEnabled } });
+                    break;
+                    
+                case "tts.status":
+                    var ttsEnabled = !string.IsNullOrEmpty(_config.ElevenLabsApiKey);
+                    await SendResponseAsync(device.WebSocket, id, new
+                    {
+                        type = "res",
+                        ok = true,
+                        payload = new
+                        {
+                            enabled = ttsEnabled,
+                            auto = ttsEnabled ? "elevenlabs" : "off",
+                            provider = ttsEnabled ? "elevenlabs" : "",
+                            fallbackProvider = (string?)null,
+                            fallbackProviders = Array.Empty<string>(),
+                            prefsPath = "",
+                            hasOpenAIKey = false,
+                            hasElevenLabsKey = ttsEnabled,
+                            edgeEnabled = false
+                        }
+                    });
+                    break;
+                    
+                case "tts.enable":
+                    await SendResponseAsync(device.WebSocket, id, new { type = "res", ok = true, payload = new { enabled = !string.IsNullOrEmpty(_config.ElevenLabsApiKey) } });
+                    break;
+                    
+                case "tts.disable":
+                    await SendResponseAsync(device.WebSocket, id, new { type = "res", ok = true, payload = new { enabled = false } });
+                    break;
+                    
                 default:
                     _logger.LogDebug("Unhandled method: {Method}", method);
                     await SendResponseAsync(device.WebSocket, id, new { type = "res", ok = false, error = new { code = "not_implemented", message = $"Method {method} not implemented" } });
@@ -551,7 +924,9 @@ public class RabbitGatewayService : BackgroundService
 
     private async Task HandleAgentPromptAsync(RabbitDevice device, JsonNode json, string? id, CancellationToken stoppingToken)
     {
+        var method = json["method"]?.GetValue<string>() ?? "agent";
         var message = json["params"]?["message"]?.GetValue<string>();
+        var sessionKey = json["params"]?["sessionKey"]?.GetValue<string>() ?? "main";
         
         if (string.IsNullOrEmpty(message))
         {
@@ -559,24 +934,121 @@ public class RabbitGatewayService : BackgroundService
             return;
         }
         
+        _logger.LogInformation("Agent prompt from device {DeviceId} (method: {Method}): {Message}", device.DeviceId, method, message);
+        
+        var runId = Guid.NewGuid().ToString();
+        var seq = 0;
+        var responseText = new StringBuilder();
+        
+        // Step 1: Immediately respond with "accepted" status per OpenCLAW protocol
+        await SendResponseAsync(device.WebSocket, id, new
+        {
+            type = "res",
+            ok = true,
+            payload = new
+            {
+                status = "accepted",
+                runId,
+                sessionKey
+            }
+        });
+        _logger.LogInformation("Sent accepted ack for runId {RunId} to device {DeviceId}", runId, device.DeviceId);
+        
         // Create a completion source to track when the agent finishes
         var agentDone = new TaskCompletionSource<bool>();
-        var requestId = Guid.NewGuid().ToString();
         
-        // Set up event handler to forward to device and track completion
+        // Step 2: Stream chat events as content arrives, with proper message object format
         Func<PiEvent, Task>? handler = null;
         handler = async evt =>
         {
-            if (device.WebSocket?.State == WebSocketState.Open)
+            if (device.WebSocket?.State != WebSocketState.Open) return;
+            
+            try
             {
-                var eventPayload = evt.Data.ToJsonString();
-                await SendEventAsync(device.WebSocket, evt.Type, JsonNode.Parse(eventPayload));
-                
-                // Check if this is the end of our request
-                if (evt.Type == "agent_end" || evt.Type == "error")
+                switch (evt.Type)
                 {
-                    agentDone.TrySetResult(true);
+                    case "message_update":
+                        var assistantEvent = evt.Data["assistantMessageEvent"];
+                        if (assistantEvent != null)
+                        {
+                            var eventType = assistantEvent["type"]?.GetValue<string>();
+                            if (eventType == "text_delta")
+                            {
+                                var delta = assistantEvent["delta"]?.GetValue<string>() ?? "";
+                                responseText.Append(delta);
+                                
+                                seq++;
+                                var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                                
+                                // Send agent event (for TTS/streaming playback)
+                                await SendEventAsync(device.WebSocket, "agent", JsonNode.Parse(JsonSerializer.Serialize(new
+                                {
+                                    runId,
+                                    seq,
+                                    stream = "stdout",
+                                    ts,
+                                    data = new { type = "text", text = delta }
+                                })));
+                                
+                                // Send chat event (for display)
+                                await SendEventAsync(device.WebSocket, "chat", JsonNode.Parse(JsonSerializer.Serialize(new
+                                {
+                                    runId,
+                                    sessionKey,
+                                    seq,
+                                    state = "delta",
+                                    message = responseText.ToString()
+                                })));
+                            }
+                        }
+                        break;
+                        
+                    case "turn_end":
+                    case "agent_end":
+                        seq++;
+                        var finalTs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        
+                        // Send final agent event
+                        await SendEventAsync(device.WebSocket, "agent", JsonNode.Parse(JsonSerializer.Serialize(new
+                        {
+                            runId,
+                            seq,
+                            stream = "end",
+                            ts = finalTs,
+                            data = new { type = "end", text = responseText.ToString() }
+                        })));
+                        
+                        // Send final chat event with state: "final"
+                        await SendEventAsync(device.WebSocket, "chat", JsonNode.Parse(JsonSerializer.Serialize(new
+                        {
+                            runId,
+                            sessionKey,
+                            seq,
+                            state = "final",
+                            message = responseText.ToString(),
+                            stopReason = "stop"
+                        })));
+                        _logger.LogInformation("Sent final agent+chat events for runId {RunId}, response: {Response}", runId, responseText.ToString());
+                        agentDone.TrySetResult(true);
+                        break;
+                        
+                    case "error":
+                        seq++;
+                        await SendEventAsync(device.WebSocket, "chat", JsonNode.Parse(JsonSerializer.Serialize(new
+                        {
+                            runId,
+                            sessionKey,
+                            seq,
+                            state = "error",
+                            errorMessage = evt.Data.ToJsonString()
+                        })));
+                        agentDone.TrySetResult(false);
+                        break;
                 }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error forwarding event to device {DeviceId}", device.DeviceId);
             }
         };
         
@@ -584,10 +1056,8 @@ public class RabbitGatewayService : BackgroundService
         
         try
         {
-            // Send to pi agent
             await _piService.SendPromptAsync(message);
             
-            // Wait for agent to complete or timeout after 5 minutes
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             cts.CancelAfter(TimeSpan.FromMinutes(5));
             
@@ -597,59 +1067,65 @@ public class RabbitGatewayService : BackgroundService
             }
             catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
             {
-                // Timeout - agent is still processing
                 _logger.LogWarning("Agent prompt timed out for device {DeviceId}", device.DeviceId);
             }
-            
-            await SendResponseAsync(device.WebSocket, id, new
-            {
-                type = "res",
-                ok = true,
-                payload = new { result = "message_processed" }
-            });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing prompt for device {DeviceId}", device.DeviceId);
-            await SendResponseAsync(device.WebSocket, id, new 
-            { 
-                type = "res", 
-                ok = false, 
-                error = new { code = "processing_error", message = ex.Message } 
-            });
         }
         finally
         {
-            if (handler != null)
-            {
-                _piService.OnEvent -= handler;
-            }
+            _piService.OnEvent -= handler;
         }
     }
 
-    private static async Task SendResponseAsync(WebSocket ws, string? id, object response)
+    private async Task SendResponseAsync(WebSocket ws, string? id, object response)
     {
-        if (ws.State != WebSocketState.Open) return;
+        if (ws.State != WebSocketState.Open)
+        {
+            _logger.LogWarning("SendResponseAsync: WebSocket not open (state={State}), skipping", ws.State);
+            return;
+        }
         
-        var json = JsonSerializer.Serialize(response);
+        // Inject request id into response frame per OpenCLAW protocol
+        var jsonNode = JsonSerializer.SerializeToNode(response);
+        if (jsonNode is JsonObject obj && id != null && !obj.ContainsKey("id"))
+        {
+            obj["id"] = id;
+        }
+        
+        var json = jsonNode?.ToJsonString() ?? JsonSerializer.Serialize(response);
+        _logger.LogInformation(">>> SEND RES: {Json}", json);
         var bytes = Encoding.UTF8.GetBytes(json);
         await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
     }
 
-    private static async Task SendEventAsync(WebSocket ws, string eventType, JsonNode? payload)
+    private async Task SendEventAsync(WebSocket ws, string eventType, JsonNode? payload)
     {
-        if (ws.State != WebSocketState.Open) return;
+        if (ws.State != WebSocketState.Open)
+        {
+            _logger.LogWarning("SendEventAsync: WebSocket not open (state={State}), skipping", ws.State);
+            return;
+        }
         
         var evt = new { type = "event", @event = eventType, payload };
         var json = JsonSerializer.Serialize(evt);
+        _logger.LogInformation(">>> SEND EVT [{EventType}]: {Json}", eventType, json);
         var bytes = Encoding.UTF8.GetBytes(json);
         await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
     }
 
-    private static async Task SendErrorAsync(WebSocket ws, string method, string error)
+    private async Task SendErrorAsync(WebSocket ws, string? requestId, string code, string message)
     {
-        var response = new { type = "res", ok = false, error = new { code = "auth_error", message = error } };
-        await SendResponseAsync(ws, null, response);
+        var response = new 
+        { 
+            type = "res", 
+            id = requestId,
+            ok = false, 
+            error = new { code = code, message = message } 
+        };
+        await SendResponseAsync(ws, requestId, response);
     }
 
     private async Task DisplayQrCodeAsync()
@@ -725,11 +1201,12 @@ public class RabbitGatewayService : BackgroundService
         
         _logger.LogInformation("Detected local IP addresses: {IPs}", string.Join(", ", ips));
         
+        // OpenCLAW/Rabbit R1 expects "openclaw-gateway" type
         var payload = new
         {
-            type = "clawdbot-gateway",
+            type = "openclaw-gateway",
             version = 1,
-            ips = ips,
+            ips,
             port = _config.RabbitGatewayPort,
             token = _authToken,
             protocol = "ws"
@@ -774,7 +1251,7 @@ public class RabbitGatewayService : BackgroundService
     private static List<string> GetLocalIPAddresses()
     {
         var ips = new List<string>();
-        
+        ips.Add("192.168.2.139");
         try
         {
             var host = Dns.GetHostEntry(Dns.GetHostName());

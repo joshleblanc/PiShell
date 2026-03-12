@@ -21,5 +21,10 @@ namespace PiCrust.Models
         public int RabbitGatewayPort { get; set; } = 18789;
         public string RabbitGatewayToken { get; set; } = string.Empty;
         public bool RabbitAutoApprove { get; set; }
+        
+        // ElevenLabs TTS configuration for Rabbit R1 Talk Mode
+        public string ElevenLabsApiKey { get; set; } = string.Empty;
+        public string ElevenLabsVoiceId { get; set; } = string.Empty;
+        public string ElevenLabsModelId { get; set; } = "eleven_v3";
     }
 }
